@@ -74,17 +74,17 @@ class wan_pde_solver(nn.Module):
     def sample_train(self, dm_size, bd_size, dim=2):
         '''
         Equation: du/dt - Laplace u = f
-        u(x,t) = g(x,t)= 2*sin(pi/2*x1)cos(pi/2*x2)*exp{-t}
-        Thus, h(x)= 2*sin(pi/2*x1)cos(pi/2*x2)
-        f(x,t) = (pi**2-2)sin(pi/2*x1)cos(pi/2*x2)*exp{-t}
+        u(x,t) = g(x,t)= 2*sin(pi/2*x1)*exp{-t}
+        Thus, h(x)= 2*sin(pi/2*x1)
+        f(x,t) = (pi**2/2-2)sin(pi/2*x1)*exp{-t}
         '''       
         # colloaction points in the domain
         x_dm = torch.distributions.uniform.Uniform(self.x_l,self.x_r).sample([dm_size,dim])
         t_dm = torch.distributions.uniform.Uniform(self.t0, self.t1).sample([dm_size,1])
         xt_dm = torch.cat((x_dm, t_dm), dim=1)
         # value of u, f , dim: [x_inside_size,x_inside_size, t_size]
-        u_true = 2*torch.sin(torch.pi/2.*xt_dm[:,0])*torch.cos(torch.pi/2.*xt_dm[:,1])*torch.exp(-xt_dm[:,-1])
-        f_obv = (torch.pi**2/2.-1.) * u_true
+        u_true = 2*torch.sin(torch.pi/2.*xt_dm[:,0])*torch.exp(-xt_dm[:,-1])
+        f_obv = (torch.pi**2/4.-1.) * u_true
 
         ## initial condition h(x)
         #x_init = torch.distributions.uniform.Uniform(self.x_l,self.x_r).sample([dm_size,dim])
@@ -93,7 +93,7 @@ class wan_pde_solver(nn.Module):
         x_end = torch.cat((x_dm, torch.ones(dm_size, 1)* self.t1),dim=1)
 
         # value of h
-        h_obv = 2*torch.sin(torch.pi/2.*x_init[:,0])*torch.cos(torch.pi/2.*x_init[:,1])
+        h_obv = 2*torch.sin(torch.pi/2.*x_init[:,0])
         ## boundary condition g(x,t)
         x_bd_list = []
         for i in range(dim):
@@ -108,7 +108,7 @@ class wan_pde_solver(nn.Module):
         x_bd = torch.cat(x_bd_list,dim=0)
 
         ## boundary of u
-        bd_obv = 2*torch.sin(torch.pi/2.*x_bd[:,0])*torch.cos(torch.pi/2.*x_bd[:,1])*torch.exp(-x_bd[:,-1])
+        bd_obv = 2*torch.sin(torch.pi/2.*x_bd[:,0])*torch.exp(-x_bd[:,-1])
 
         return (xt_dm, x_init, x_end, x_bd, f_obv.view(-1,1), h_obv.view(-1,1), bd_obv.view(-1,1))
 
@@ -129,7 +129,7 @@ class wan_pde_solver(nn.Module):
         ## value of x, dim: [mesh_size*mesh_size*time_size,dim+1]
         x = torch.stack((x1,x2,t),dim=1)
         ## value of u (x,t), dim: [mesh_size*mesh_size*time_size]
-        u_true = 2*torch.sin(torch.pi/2.*x[:,0])*torch.cos(torch.pi/2.*x[:,1])*torch.exp(-x[:,-1])  
+        u_true = 2*torch.sin(torch.pi/2.*x[:,0])*torch.exp(-x[:,-1])  
         ## random test data
         # x_inside = torch.distributions.uniform.Uniform(self.x_l,self.x_r).sample([test_size,dim])
         # t_inside = torch.distributions.uniform.Uniform(self.t0, self.t1).sample([test_size,1])
@@ -178,15 +178,15 @@ class wan_pde_solver(nn.Module):
         # so test function with constraints: p = w*v
         I1 = 0.210987 #decay_coefficient
         
-        w = torch.exp(-1./((x_in[:,0]**2-1)*(x_in[:,1]**2-1)))/I1
+        w = torch.exp(1./(x_in[:,0]**2-1))/I1
         w = torch.where(torch.isinf(w), torch.full_like(w,0), w)
         if diff:
-            # dwx = 2x/(I(x**2-1)**2) * w
-            dw_x = 2.* x_in[:,0] / ((x_in[:,0]**2 -1 )**2 * (x_in[:,1]**2-1)) * w /I1
-            dw_y = 2.* x_in[:,1] / ((x_in[:,1]**2 -1 )**2 * (x_in[:,0]**2-1)) * w /I1
+            # dwx = -2x/(I(x**2-1)**2) * w
+            dw_x = -2.* x_in[:,0] / ((x_in[:,0]**2 -1 )**2) * w /I1
+            #dw_y = 2.* x_in[:,1] / ((x_in[:,1]**2 -1 )**2 * (x_in[:,0]**2-1)) * w /I1
             dw_x = torch.where(torch.isnan(dw_x), torch.full_like(dw_x,0),dw_x)
-            dw_y = torch.where(torch.isnan(dw_y), torch.full_like(dw_y,0),dw_y)
-            return w.view(-1,1), dw_x.view(-1,1), dw_y.view(-1,1)
+            #dw_y = torch.where(torch.isnan(dw_y), torch.full_like(dw_y,0),dw_y)
+            return w.view(-1,1), dw_x.view(-1,1)
         else:
             return w.view(-1,1)
 
@@ -210,12 +210,14 @@ class wan_pde_solver(nn.Module):
         ## inside domain
         u_dm, dux_dm, duy_dm, dut_dm = self.forward_u(x_dm)
         v_dm, dvx_dm, dvy_dm, dvt_dm = self.forward_v(x_dm)
-        w_dm, dwx_dm, dwy_dm = self.constraints_w(x_dm[:,:-1],diff=True)
+        w_dm, dwx_dm = self.constraints_w(x_dm[:,:-1],diff=True)
         p_dm = w_dm * v_dm
 
+
+        #print(w_dm.max().item(), dwx_dm.max().item(),w_dm.min().item(), dwx_dm.min().item())
         ## nabla u * nabla p = nabla u * (v nabla w + w nabla v)
         dux_dp_dm = dux_dm * (v_dm * dwx_dm + w_dm * dvx_dm)
-        duy_dp_dm = duy_dm * (v_dm * dwy_dm + w_dm * dvy_dm)
+        #duy_dp_dm = duy_dm * (v_dm * dwy_dm + w_dm * dvy_dm)
         ## u * dp/dt = u * (w * dv/dt + v * dw/dt)
         u_dpt = u_dm * w_dm * dvt_dm
         ## f * p = f * w * v
@@ -230,7 +232,7 @@ class wan_pde_solver(nn.Module):
         int_l1 = torch.mean((u_end * p_end - h_obv * p_init)) * self.int_x
         int_l2 = torch.mean(u_dpt) * int_dm
         ## 2. int nabla u * nabla v
-        int_l3 = torch.mean((dux_dp_dm + duy_dp_dm)) * int_dm
+        int_l3 = torch.mean((dux_dp_dm )) * int_dm
         ## 3. int f * p
         int_l4 = torch.mean(f_p_dm) * int_dm
 
@@ -262,12 +264,12 @@ class wan_pde_solver(nn.Module):
         ## inside domain
         u_dm, dux_dm, duy_dm, dut_dm = self.forward_u(x_dm)
         v_dm, dvx_dm, dvy_dm, dvt_dm = self.forward_v(x_dm)
-        w_dm, dwx_dm, dwy_dm = self.constraints_w(x_dm[:,:-1],diff=True)
+        w_dm, dwx_dm  = self.constraints_w(x_dm[:,:-1],diff=True)
         p_dm = w_dm * v_dm
-
+       # print(w_dm.max().item(), dwx_dm.max().item(),w_dm.min().item(), dwx_dm.min().item())
         ## nabla u * nabla p = nabla u * (v nabla w + w nabla v)
         dux_dp_dm = dux_dm * (v_dm * dwx_dm + w_dm * dvx_dm)
-        duy_dp_dm = duy_dm * (v_dm * dwy_dm + w_dm * dvy_dm)
+        #duy_dp_dm = duy_dm * (v_dm * dwy_dm + w_dm * dvy_dm)
         ## u * dp/dt = u * (w * dv/dt + v * dw/dt)
         u_dpt = u_dm * w_dm * dvt_dm
         ## f * p = f * w * v
@@ -282,7 +284,7 @@ class wan_pde_solver(nn.Module):
         int_l1 = (u_end * p_end - h_obv * p_init) * self.int_x
         int_l2 = u_dpt * int_dm
         ## 2. int nabla u * nabla v
-        int_l3 = (dux_dp_dm + duy_dp_dm) * int_dm
+        int_l3 = (dux_dp_dm) * int_dm
         ## 3. int f * p
         int_l4 = f_p_dm * int_dm
 
@@ -348,7 +350,7 @@ class wan_pde_solver(nn.Module):
 if __name__ == '__main__':
     solver = wan_pde_solver(N_dm = 40000,
                             N_bd = 200,
-                            beta = 2000,
+                            beta = 20000,
                             v_step = 1,
                             u_step = 2,
                             v_lr = 0.04,
