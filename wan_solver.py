@@ -31,27 +31,26 @@ class MLPBlock(nn.Module):
         return x
 
 class wan_pde_solver(nn.Module):
-    def __init__(self, N_dm, N_bd, beta_int, beta_bd,
-                 v_step, v_lr, u_step, u_lr, dim=2, x_range=[-1,1], t_range=[0,1],
+    def __init__(self, N_dm, N_bd, beta, v_step, u_step,
+                v_lr=0.001, u_lr=0.001, dim=2, x_range=[-1,1], t_range=[0,1],
                  iteration=20000):
         super().__init__()
         
         self.x_l, self.x_r = x_range[0], x_range[1]         # x range [-1, 1] * [-1, 1]
         self.t0, self.t1 = t_range[0], t_range[1]           # t range [0, 1]
         self.dim= dim                           #dimension of the problem
-        self.mesh_size= 50                      #for generating testing data
         self.dm_size= N_dm                      #collocation points in domain                   
         self.bd_size= N_bd                      #collocation points on domain boundary
 
         self.iteration= iteration
-        self.beta_int= 1
-        self.beta_bd= 2000
+
+        self.beta= beta                         # boundary condition hyperparameters
                     
-        self.v_step= 1                        
-        self.v_lr = 0.001  
+        self.v_step= v_step                       
+        self.v_lr = v_lr  
         #                      
-        self.u_step= 2              
-        self.u_lr = 0.001
+        self.u_step= u_step              
+        self.u_lr = u_lr
 
         ## integral x,t
         self.int_x = (self.x_r-self.x_l)**2
@@ -123,7 +122,7 @@ class wan_pde_solver(nn.Module):
         # make data in the domain
         x_mesh = torch.linspace(self.x_l,self.x_r,mesh_size)
         t_mesh = torch.linspace(self.t0,self.t1,time_size)
-        x1, x2, t = torch.meshgrid(x_mesh, x_mesh, t_mesh)
+        x1, x2, t = torch.meshgrid(x_mesh, x_mesh, t_mesh,indexing="ij")
         x1 = x1.reshape(-1)
         x2 = x2.reshape(-1)
         t = t.reshape(-1)
@@ -178,11 +177,15 @@ class wan_pde_solver(nn.Module):
         # decay function w = e^(-1/(x^2-1))/I  Boundary tends to 0
         # so test function with constraints: p = w*v
         I1 = 0.210987 #decay_coefficient
+        
         w = torch.exp(-1./((x_in[:,0]**2-1)*(x_in[:,1]**2-1)))/I1
+        w = torch.where(torch.isinf(w), torch.full_like(w,0), w)
         if diff:
             # dwx = 2x/(I(x**2-1)**2) * w
             dw_x = 2.* x_in[:,0] / ((x_in[:,0]**2 -1 )**2 * (x_in[:,1]**2-1)) * w /I1
             dw_y = 2.* x_in[:,1] / ((x_in[:,1]**2 -1 )**2 * (x_in[:,0]**2-1)) * w /I1
+            dw_x = torch.where(torch.isnan(dw_x), torch.full_like(dw_x,0),dw_x)
+            dw_y = torch.where(torch.isnan(dw_y), torch.full_like(dw_y,0),dw_y)
             return w.view(-1,1), dw_x.view(-1,1), dw_y.view(-1,1)
         else:
             return w.view(-1,1)
@@ -235,8 +238,8 @@ class wan_pde_solver(nn.Module):
         
         loss_bd = torch.norm(u_bd-bd_obv) + torch.norm(u_init-h_obv)
 
-        loss_u = self.beta_bd * loss_bd + self.beta_int * loss_int
-        loss_v = -torch.log(loss_int + 1e-8)
+        loss_u = self.beta * loss_bd + loss_int
+        loss_v = -torch.log(loss_int)
         return loss_u, loss_v, loss_int, loss_bd
 
     def build2(self, x_dm, x_init, x_end, x_bd, f_obv, h_obv, bd_obv):
@@ -287,7 +290,7 @@ class wan_pde_solver(nn.Module):
         
         loss_bd = torch.norm(u_bd-bd_obv) + torch.norm(u_init-h_obv)
 
-        loss_u = self.beta_bd * loss_bd + self.beta_int * loss_int
+        loss_u = self.beta * loss_bd + loss_int
         loss_v = loss_int
         return loss_u, loss_v, loss_int, loss_bd
     
@@ -307,7 +310,7 @@ class wan_pde_solver(nn.Module):
         #
         start_time = time.time()
         for itr in range(self.iteration):
-            print("********** Iteration {} ************".format(itr))
+            #print("********** Iteration {} ************".format(itr))
             #print("time elapsed: {:.2f} s".format(time.time() - start_time))
             ## sampling step ##
             sample_start = time.time()
@@ -325,24 +328,30 @@ class wan_pde_solver(nn.Module):
             for _ in range(self.v_step):
                 loss_u, loss_v, loss_int, loss_bd = self.build2(x_dm, x_init, x_end, x_bd, f_obv, h_obv, bd_obv)
                 self.v_opt.zero_grad()
-                loss_v.backward(retain_graph=True)
+                loss_v.backward()
                 self.v_opt.step()
             for _ in range(self.u_step):
                 loss_u, loss_v, loss_int, loss_bd = self.build2(x_dm, x_init, x_end, x_bd, f_obv, h_obv, bd_obv)
                 self.u_opt.zero_grad()
-                loss_u.backward(retain_graph=True)
+                loss_u.backward()
                 self.u_opt.step()
             
             opt_time = time.time() - optimizer_start
-            print("{:.2f} s to optimizer| loss_u {:6.3f}, loss_v {:6.3f}.".format(opt_time, loss_u, loss_v))
+            #print("{:.2f} s to optimizer| loss_u {:6.3f}, loss_v {:6.3f}.".format(opt_time, loss_u, loss_v))
             ## test step ##
-            if itr % 1==0:
+            if itr % 50 ==0:
                 pred_u = self.forward(x_test)
                 err_l2= torch.norm(pred_u-u_test)
-                print("loss_u:{:6.3f} loss_v:{:6.3f} loss_int:{:6.3f} loss_bd:{:6.3f} test_norm:{:6.3f}".format(loss_u, loss_v, loss_int, loss_bd, err_l2))
+                print("iteration {:n}: loss_u:{:6.3f} loss_v:{:6.3f} loss_int:{:6.3f} loss_bd:{:6.3f} test_norm:{:6.3f}".format(itr, loss_u, loss_v, loss_int, loss_bd, err_l2))
 
     
 if __name__ == '__main__':
-    solver = wan_pde_solver(40000,200,1,1,1,0.05,1,0.01)
+    solver = wan_pde_solver(N_dm = 40000,
+                            N_bd = 200,
+                            beta = 2000,
+                            v_step = 1,
+                            u_step = 2,
+                            v_lr = 0.04,
+                            u_lr = 0.015)
     solver.main_fun()
     pass
